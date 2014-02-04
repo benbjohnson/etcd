@@ -125,7 +125,7 @@ func (s *PeerServer) Start(snapshot bool, cluster []string) error {
 
 	} else {
 		// Rejoin the previous cluster
-		cluster = s.registry.PeerURLs(s.raftServer.Leader(), s.Config.Name)
+		cluster = s.registry.PeerPeerURLs(s.raftServer.Leader(), s.Config.Name)
 		for i := 0; i < len(cluster); i++ {
 			u, err := url.Parse(cluster[i])
 			if err != nil {
@@ -238,7 +238,7 @@ func getVersion(t *transporter, versionURL url.URL) (int, error) {
 // Upgradable checks whether all peers in a cluster support an upgrade to the next store version.
 func (s *PeerServer) Upgradable() error {
 	nextVersion := s.store.Version() + 1
-	for _, peerURL := range s.registry.PeerURLs(s.raftServer.Leader(), s.Config.Name) {
+	for _, peerURL := range s.registry.PeerPeerURLs(s.raftServer.Leader(), s.Config.Name) {
 		u, err := url.Parse(peerURL)
 		if err != nil {
 			return fmt.Errorf("PeerServer: Cannot parse URL: '%s' (%s)", peerURL, err)

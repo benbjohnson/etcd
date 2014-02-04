@@ -271,7 +271,7 @@ func (s *Server) GetLeaderHandler(w http.ResponseWriter, req *http.Request) erro
 
 // Handler to return all the known peers in the current cluster.
 func (s *Server) GetPeersHandler(w http.ResponseWriter, req *http.Request) error {
-	peers := s.registry.ClientURLs(s.peerServer.RaftServer().Leader(), s.Name)
+	peers := s.registry.PeerClientURLs(s.peerServer.RaftServer().Leader(), s.Name)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(strings.Join(peers, ", ")))
 	return nil

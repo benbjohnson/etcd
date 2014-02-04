@@ -13,13 +13,17 @@ import (
 )
 
 // The location of the peer URL data.
-const RegistryKey = "/_etcd/machines"
+const RegistryPeerKey = "/_etcd/machines"
+
+// The location of the proxy URL data.
+const RegistryProxyKey = "/_etcd/proxies"
 
 // The Registry stores URL information for nodes.
 type Registry struct {
 	sync.Mutex
 	store store.Store
-	nodes map[string]*node
+	peers map[string]*node
+	proxies map[string]*node
 }
 
 // The internal storage format of the registry.
@@ -31,29 +35,56 @@ type node struct {
 
 // Creates a new Registry.
 func NewRegistry(s store.Store) *Registry {
-	return &Registry{
-		store: s,
-		nodes: make(map[string]*node),
+	r := &Registry{store: s}
+	r.peers = r.load(RegistryPeerKey)
+	r.proxies = r.load(RegistryProxyKey)
+	return r
+}
+
+// Adds a peer to the registry.
+func (r *Registry) RegisterPeer(name string, peerURL string, machURL string) error {
+	if err := r.register(RegistryPeerKey, name, peerURL, machURL); err != nil {
+		return err
 	}
+	r.peers = r.load(RegistryPeerKey)
+	return nil
+}
+
+// Adds a proxy to the registry.
+func (r *Registry) RegisterProxy(name string, peerURL string, machURL string) error {
+	if err := r.register(RegistryProxyKey, name, peerURL, machURL); err != nil {
+		return err
+	}
+	r.proxies = r.load(RegistryProxyKey)
+	return nil
 }
 
 // Adds a node to the registry.
-func (r *Registry) Register(name string, peerURL string, machURL string) error {
+func (r *Registry) register(key string, name string, peerURL string, machURL string) error {
 	r.Lock()
 	defer r.Unlock()
 
+	// TODO(benbjohnson): Disallow registration in peers and proxies at the same time.
+
 	// Write data to store.
-	key := path.Join(RegistryKey, name)
 	v := url.Values{}
 	v.Set("raft", peerURL)
 	v.Set("etcd", machURL)
-	_, err := r.store.Create(key, false, v.Encode(), false, store.Permanent)
+	_, err := r.store.Create(path.Join(key, name), false, v.Encode(), false, store.Permanent)
 	log.Debugf("Register: %s", name)
 	return err
 }
 
 // Removes a node from the registry.
 func (r *Registry) Unregister(name string) error {
+	if r.proxies[name] != nil {
+		return r.unregister(RegistryProxyKey, name)
+	}
+	return r.unregister(RegistryPeerKey, name)
+}
+
+// Removes a node from the registry.
+func (r *Registry) unregister(key string, name string) error {
 	r.Lock()
 	defer r.Unlock()
 
@@ -61,14 +92,24 @@ func (r *Registry) Unregister(name string) error {
 	// delete(r.nodes, name)
 
 	// Remove the key from the store.
-	_, err := r.store.Delete(path.Join(RegistryKey, name), false, false)
+	_, err := r.store.Delete(path.Join(key, name), false, false)
 	log.Debugf("Unregister: %s", name)
 	return err
 }
 
+// Returns the number of peers in the cluster.
+func (r *Registry) PeerCount() int {
+	return r.count(RegistryPeerKey)
+}
+
+// Returns the number of proxies in the cluster.
+func (r *Registry) ProxyCount() int {
+	return r.count(RegistryProxyKey)
+}
+
 // Returns the number of nodes in the cluster.
-func (r *Registry) Count() int {
-	e, err := r.store.Get(RegistryKey, false, false)
+func (r *Registry) count(key string) int {
+	e, err := r.store.Get(key, false, false)
 	if err != nil {
 		return 0
 	}
@@ -83,14 +124,12 @@ func (r *Registry) ClientURL(name string) (string, bool) {
 }
 
 func (r *Registry) clientURL(name string) (string, bool) {
-	if r.nodes[name] == nil {
-		r.load(name)
+	if n := r.peers[name]; n != nil {
+		return n.url, true
 	}
-
-	if node := r.nodes[name]; node != nil {
-		return node.url, true
+	if n := r.proxies[name]; n != nil {
+		return n.url, true
 	}
-
 	return "", false
 }
 
@@ -102,29 +141,37 @@ func (r *Registry) PeerURL(name string) (string, bool) {
 }
 
 func (r *Registry) peerURL(name string) (string, bool) {
-	if r.nodes[name] == nil {
-		r.load(name)
+	if n := r.peers[name]; n != nil {
+		return n.peerURL, true
 	}
-
-	if node := r.nodes[name]; node != nil {
-		return node.peerURL, true
+	if n := r.proxies[name]; n != nil {
+		return n.peerURL, true
 	}
-
 	return "", false
 }
 
-// Retrieves the Client URLs for all nodes.
-func (r *Registry) ClientURLs(leaderName, selfName string) []string {
-	return r.urls(leaderName, selfName, r.clientURL)
+// Retrieves the Client URLs for all peers.
+func (r *Registry) PeerClientURLs(leaderName, selfName string) []string {
+	return r.urls(RegistryPeerKey, leaderName, selfName, r.clientURL)
 }
 
-// Retrieves the Peer URLs for all nodes.
-func (r *Registry) PeerURLs(leaderName, selfName string) []string {
-	return r.urls(leaderName, selfName, r.peerURL)
+// Retrieves the Peer URLs for all peers.
+func (r *Registry) PeerPeerURLs(leaderName, selfName string) []string {
+	return r.urls(RegistryPeerKey, leaderName, selfName, r.peerURL)
+}
+
+// Retrieves the Client URLs for all proxies.
+func (r *Registry) ProxyClientURLs(leaderName, selfName string) []string {
+	return r.urls(RegistryProxyKey, leaderName, selfName, r.clientURL)
+}
+
+// Retrieves the Proxy URLs for all proxies.
+func (r *Registry) ProxyPeerURLs(leaderName, selfName string) []string {
+	return r.urls(RegistryProxyKey, leaderName, selfName, r.peerURL)
 }
 
 // Retrieves the URLs for all nodes using url function.
-func (r *Registry) urls(leaderName, selfName string, url func(name string) (string, bool)) []string {
+func (r *Registry) urls(key, leaderName, selfName string, url func(name string) (string, bool)) []string {
 	r.Lock()
 	defer r.Unlock()
 
@@ -135,7 +182,7 @@ func (r *Registry) urls(leaderName, selfName string, url func(name string) (stri
 	}
 
 	// Retrieve a list of all nodes.
-	if e, _ := r.store.Get(RegistryKey, false, false); e != nil {
+	if e, _ := r.store.Get(key, false, false); e != nil {
 		// Lookup the URL for each one.
 		for _, pair := range e.Node.Nodes {
 			_, name := filepath.Split(pair.Key)
@@ -152,30 +199,32 @@ func (r *Registry) urls(leaderName, selfName string, url func(name string) (stri
 
 // Removes a node from the cache.
 func (r *Registry) Invalidate(name string) {
-	delete(r.nodes, name)
+	delete(r.peers, name)
+	delete(r.proxies, name)
 }
 
-// Loads the given node by name from the store into the cache.
-func (r *Registry) load(name string) {
-	if name == "" {
-		return
-	}
+func (r *Registry) load(key string) map[string]*node {
+	nodes := make(map[string]*node)
 
 	// Retrieve from store.
-	e, err := r.store.Get(path.Join(RegistryKey, name), false, false)
-	if err != nil {
-		return
+	e, err := r.store.Get(key, false, false)
+	if e == nil || err != nil {
+		return nodes
 	}
 
-	// Parse as a query string.
-	m, err := url.ParseQuery(e.Node.Value)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to parse peers entry: %s", name))
+	// Loop over collection and create nodes.
+	for _, n := range e.Node.Nodes {
+		name := path.Base(n.Key)
+		m, err := url.ParseQuery(n.Value)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to parse registry entry: %s: %s", key, name))
+		}
+
+		nodes[name] = &node{
+			url:     m["etcd"][0],
+			peerURL: m["raft"][0],
+		}
 	}
 
-	// Create node.
-	r.nodes[name] = &node{
-		url:     m["etcd"][0],
-		peerURL: m["raft"][0],
-	}
+	return nodes
 }

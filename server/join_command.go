@@ -3,8 +3,6 @@ package server
 import (
 	"encoding/binary"
 
-	etcdErr "github.com/coreos/etcd/error"
-	"github.com/coreos/etcd/log"
 	"github.com/coreos/etcd/third_party/github.com/coreos/raft"
 )
 
@@ -51,14 +49,20 @@ func (c *JoinCommand) Apply(context raft.Context) (interface{}, error) {
 		return b, nil
 	}
 
-	// Check peer number in the cluster
-	if ps.registry.Count() == ps.Config.MaxClusterSize {
-		log.Debug("Reject join request from ", c.Name)
-		return []byte{0}, etcdErr.NewError(etcdErr.EcodeNoMorePeer, "", context.CommitIndex())
+	// Change the new member to a proxy if we're beyond the max cluster size.
+	var mode = "active"
+	if ps.registry.PeerCount() >= ps.Config.MaxClusterSize {
+		mode = "proxy"
+	}
+
+	// Add proxies to a separate list and avoid Raft entirely.
+	if mode == "proxy" {
+		ps.registry.RegisterProxy(c.Name, c.RaftURL, c.EtcdURL)
+		return b, nil
 	}
 
 	// Add to shared peer registry.
-	ps.registry.Register(c.Name, c.RaftURL, c.EtcdURL)
+	ps.registry.RegisterPeer(c.Name, c.RaftURL, c.EtcdURL)
 
 	// Add peer in raft
 	err := context.Server().AddPeer(c.Name, "")
