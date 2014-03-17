@@ -71,7 +71,6 @@ func NewTransporter(followersStats *raftFollowersStats, serverStats *raftServerS
 		serverStats:       serverStats,
 		registry:          registry,
 	}
-
 	return &t
 }
 

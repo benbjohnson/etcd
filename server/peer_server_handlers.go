@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -10,8 +11,8 @@ import (
 	"github.com/coreos/etcd/third_party/github.com/gorilla/mux"
 
 	etcdErr "github.com/coreos/etcd/error"
-	uhttp "github.com/coreos/etcd/pkg/http"
 	"github.com/coreos/etcd/log"
+	uhttp "github.com/coreos/etcd/pkg/http"
 	"github.com/coreos/etcd/store"
 )
 
@@ -171,6 +172,25 @@ func (ps *PeerServer) JoinHttpHandler(w http.ResponseWriter, req *http.Request) 
 	}
 }
 
+// Attempt to rejoin the cluster as a peer.
+func (ps *PeerServer) PromoteHttpHandler(w http.ResponseWriter, req *http.Request) {
+	log.Infof("%s attempting to promote in cluster: %s", ps.Config.Name, ps.proxyPeerURL)
+	url, err := url.Parse(ps.proxyPeerURL)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err = ps.joinByPeer(ps.raftServer, url.Host, ps.Config.Scheme)
+	if err != nil {
+		log.Infof("%s error while promoting: %v", ps.Config.Name, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	log.Infof("%s promoted in the cluster", ps.Config.Name)
+	w.WriteHeader(http.StatusOK)
+}
+
 // Response to remove request
 func (ps *PeerServer) RemoveHttpHandler(w http.ResponseWriter, req *http.Request) {
 	if req.Method != "DELETE" {
@@ -186,6 +206,84 @@ func (ps *PeerServer) RemoveHttpHandler(w http.ResponseWriter, req *http.Request
 	log.Debugf("[recv] Remove Request [%s]", command.Name)
 
 	ps.server.Dispatch(command, w, req)
+}
+
+// Returns a JSON-encoded cluster configuration.
+func (ps *PeerServer) getClusterConfigHttpHandler(w http.ResponseWriter, req *http.Request) {
+	json.NewEncoder(w).Encode(&ps.clusterConfig)
+}
+
+// Updates the cluster configuration.
+func (ps *PeerServer) setClusterConfigHttpHandler(w http.ResponseWriter, req *http.Request) {
+	// Decode map.
+	m := make(map[string]interface{})
+	if err := json.NewDecoder(req.Body).Decode(&m); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Copy config and update fields passed in.
+	config := &ClusterConfig{
+		ActiveSize:   ps.clusterConfig.ActiveSize,
+		PromoteDelay: ps.clusterConfig.PromoteDelay,
+	}
+	if activeSize, ok := m["activeSize"].(float64); ok {
+		config.ActiveSize = int(activeSize)
+	}
+	if promoteDelay, ok := m["promoteDelay"].(float64); ok {
+		config.PromoteDelay = int(promoteDelay)
+	}
+
+	// Issue command to update.
+	c := &SetClusterConfigCommand{Config: config}
+	log.Debugf("[recv] Update Cluster Config Request")
+	ps.server.Dispatch(c, w, req)
+
+	json.NewEncoder(w).Encode(&ps.clusterConfig)
+}
+
+// Retrieves a list of peers and proxies.
+func (ps *PeerServer) getMachinesHttpHandler(w http.ResponseWriter, req *http.Request) {
+	machines := make([]*machineMessage, 0)
+	for _, name := range ps.registry.Peers() {
+		machines = append(machines, ps.getMachineMessage(name))
+	}
+	for _, name := range ps.registry.Proxies() {
+		machines = append(machines, ps.getMachineMessage(name))
+	}
+	json.NewEncoder(w).Encode(&machines)
+}
+
+// Retrieve single peer or proxy.
+func (ps *PeerServer) getMachineHttpHandler(w http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	json.NewEncoder(w).Encode(ps.getMachineMessage(vars["name"]))
+}
+
+func (ps *PeerServer) getMachineMessage(name string) *machineMessage {
+	if ps.registry.PeerExists(name) {
+		clientURL, _ := ps.registry.ClientURL(name)
+		peerURL, _ := ps.registry.PeerURL(name)
+		return &machineMessage{
+			Name:      name,
+			Mode:      PeerMode,
+			ClientURL: clientURL,
+			PeerURL:   peerURL,
+		}
+	}
+
+	if ps.registry.ProxyExists(name) {
+		clientURL, _ := ps.registry.ProxyClientURL(name)
+		peerURL, _ := ps.registry.ProxyPeerURL(name)
+		return &machineMessage{
+			Name:      name,
+			Mode:      ProxyMode,
+			ClientURL: clientURL,
+			PeerURL:   peerURL,
+		}
+	}
+
+	return nil
 }
 
 // Response to the name request
@@ -232,4 +330,12 @@ func (ps *PeerServer) UpgradeHttpHandler(w http.ResponseWriter, req *http.Reques
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// machineMessage represents information about a peer or proxy in the registry.
+type machineMessage struct {
+	Name      string `json:"name"`
+	Mode      Mode   `json:"mode"`
+	ClientURL string `json:"clientURL"`
+	PeerURL   string `json:"peerURL"`
 }
