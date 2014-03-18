@@ -188,6 +188,7 @@ func (ps *PeerServer) PromoteHttpHandler(w http.ResponseWriter, req *http.Reques
 		return
 	}
 	log.Infof("%s promoted in the cluster", ps.Config.Name)
+
 	w.WriteHeader(http.StatusOK)
 }
 
